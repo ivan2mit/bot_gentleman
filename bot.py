@@ -23,6 +23,9 @@ except (ValueError, TypeError):
 
 SCHEDULES_FILE = 'user_schedules.json'
 NAMES_FILE = 'user_names.json'
+DIALOGS_FILE = 'user_dialogs.json'
+COMPLIMENTS_FILE = 'user_compliments.json'
+MAX_DIALOG_HISTORY = 15  # Максимум сообщений в истории на пользователя
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -50,7 +53,8 @@ GENTLEMAN_SYSTEM_PROMPT = """Ты — галантный и воспитанны
 - Если пользователь грустит, проявляй эмпатию
 - Поддерживай разговор, задавай вопросы
 - Никогда не пиши грубо или неуважительно
-- Ответы 1-2 абзаца, не длинный текст"""
+- Ответы 1-2 абзаца, не длинный текст
+- Отвечай разнообразно, избегай повторов"""
 
 
 class GentlemanBot:
@@ -60,6 +64,8 @@ class GentlemanBot:
         self.app = None
         self.user_schedules = {}
         self.user_names = {}
+        self.user_dialogs = {}  # История диалогов
+        self.user_compliments = {}  # История комплиментов для избежания повторений
         
         try:
             self.giga = GigaChat(
@@ -74,6 +80,8 @@ class GentlemanBot:
         # Загружаем расписания и имена из файлов
         self.load_schedules()
         self.load_names()
+        self.load_dialogs()
+        self.load_compliments()
     
     def load_schedules(self):
         """Загрузить расписания пользователей из файла"""
@@ -113,16 +121,166 @@ class GentlemanBot:
         except Exception as e:
             logger.error(f"Ошибка сохранения имён: {e}")
     
-    def get_response(self, user_message: str) -> str:
-        """Получить ответ от GigaChat"""
+    def load_dialogs(self):
+        """Загрузить историю диалогов из файла"""
+        try:
+            if Path(DIALOGS_FILE).exists():
+                with open(DIALOGS_FILE, 'r', encoding='utf-8') as f:
+                    self.user_dialogs = json.load(f)
+                logger.info(f"✅ Загружено диалогов: {len(self.user_dialogs)}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки диалогов: {e}")
+    
+    def save_dialogs(self):
+        """Сохранить историю диалогов в файл"""
+        try:
+            with open(DIALOGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.user_dialogs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения диалогов: {e}")
+    
+    def load_compliments(self):
+        """Загрузить историю комплиментов"""
+        try:
+            if Path(COMPLIMENTS_FILE).exists():
+                with open(COMPLIMENTS_FILE, 'r', encoding='utf-8') as f:
+                    self.user_compliments = json.load(f)
+                logger.info(f"✅ Загружено истории комплиментов: {len(self.user_compliments)}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки комплиментов: {e}")
+    
+    def save_compliments(self):
+        """Сохранить историю комплиментов"""
+        try:
+            with open(COMPLIMENTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.user_compliments, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения комплиментов: {e}")
+    
+    def add_compliment(self, user_id: str, compliment: str):
+        """Добавить комплимент в историю"""
+        user_id_str = str(user_id)
+        if user_id_str not in self.user_compliments:
+            self.user_compliments[user_id_str] = []
+        
+        self.user_compliments[user_id_str].append({
+            "text": compliment,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Ограничиваем последними 20 комплиментами
+        if len(self.user_compliments[user_id_str]) > 20:
+            self.user_compliments[user_id_str] = self.user_compliments[user_id_str][-20:]
+        
+        self.save_compliments()
+    
+    def get_compliment_context(self, user_id: str) -> str:
+        """Получить контекст о предыдущих комплиментах с запрещёнными словами"""
+        user_id_str = str(user_id)
+        if user_id_str not in self.user_compliments or not self.user_compliments[user_id_str]:
+            return ""
+        
+        # Берём последние 6 комплиментов
+        recent = self.user_compliments[user_id_str][-6:]
+        
+        # Извлекаем запрещённые фразы и слова
+        forbidden_phrases = []
+        all_text = " ".join([c["text"] for c in recent]).lower()
+        
+        # Ищем стандартные сравнения
+        keywords = ["картин", "замок", "ручей", "цветок", "солнц", "улыбк", "весн", "старинн", "древн", "библиотек", "рембрандт", "очарован", "благородств"]
+        
+        for keyword in keywords:
+            if keyword in all_text:
+                forbidden_phrases.append(f"- ❌ Старые образы со словом '{keyword}'")
+        
+        # Если очень много повторений, добавим более агрессивные инструкции
+        forbidden_text = "\n".join(set(forbidden_phrases[:5])) if forbidden_phrases else ""
+        
+        return f"""
+🚫 ЗАПРЕЩЁННЫЕ СТИЛИ (из предыдущих комплиментов):
+{forbidden_text if forbidden_text else "- ❌ Старинные замки, картины, ручьи, цветы"}
+
+⚠️ ПРАВИЛА:
+1. НЕ используй сравнения с искусством (картины, замки, библиотеки)
+2. НЕ используй природные метафоры (ручьи, весна, цветы, солнце, деревья)
+3. ЗАПРЕЩЕНО повторение ЛЮБЫХ образов из предыдущих 6 комплиментов
+4. Придумай УНИКАЛЬНЫЙ подход - может быть про её характер, таланты, энергию, влияние на людей
+
+Создай АБСОЛЮТНО НОВЫЙ комплимент в ДРУГОМ стиле!
+"""
+    
+    def add_to_dialog_history(self, user_id: str, role: str, content: str):
+        """Добавить сообщение в историю диалога пользователя"""
+        if user_id not in self.user_dialogs:
+            self.user_dialogs[user_id] = []
+        
+        self.user_dialogs[user_id].append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Ограничиваем историю последними N сообщениями
+        if len(self.user_dialogs[user_id]) > MAX_DIALOG_HISTORY:
+            self.user_dialogs[user_id] = self.user_dialogs[user_id][-MAX_DIALOG_HISTORY:]
+        
+        self.save_dialogs()
+    
+    def get_dialog_context(self, user_id: str) -> list:
+        """Получить контекст диалога для GigaChat"""
+        messages = []
+        
+        # Добавляем системный промпт с информацией о контексте
+        system_content = GENTLEMAN_SYSTEM_PROMPT
+        
+        # Если есть история - добавляем краткую справку о беседе
+        if user_id in self.user_dialogs and self.user_dialogs[user_id]:
+            history = self.user_dialogs[user_id]
+            recent_topics = []
+            for msg in history[-6:]:  # Последние 3 пары сообщений
+                recent_topics.append(msg["content"])
+            
+            if recent_topics:
+                system_content += f"\n\nКратко о беседе: {', '.join(recent_topics)}"
+        
+        messages.append(Messages(
+            role=MessagesRole.SYSTEM,
+            content=system_content
+        ))
+        
+        # Добавляем только последние 3 сообщения пользователя для контекста
+        # (не ответы бота, т.к. GigaChat может не поддерживать ASSISTANT роль)
+        if user_id in self.user_dialogs:
+            user_messages = [msg for msg in self.user_dialogs[user_id] if msg["role"].upper() == "USER"]
+            for msg in user_messages[-3:]:  # Последние 3 сообщения пользователя
+                messages.append(Messages(
+                    role=MessagesRole.USER,
+                    content=msg["content"]
+                ))
+        
+        return messages
+    
+    def get_response(self, user_message: str, user_id: str = None) -> str:
+        """Получить ответ от GigaChat с сохранением контекста"""
         if not self.giga:
             return "⚠️ Бот временно недоступен. Проверьте API ключ."
         
         try:
             logger.info(f"📤 Запрос: {user_message[:100]}")
             
-            payload = Chat(
-                messages=[
+            # Если есть user_id, используем контекст диалога
+            if user_id:
+                user_id_str = str(user_id)
+                messages = self.get_dialog_context(user_id_str)
+                # Добавляем текущее сообщение пользователя
+                messages.append(Messages(
+                    role=MessagesRole.USER,
+                    content=user_message
+                ))
+            else:
+                # Без контекста - для команд типа /compliment
+                messages = [
                     Messages(
                         role=MessagesRole.SYSTEM,
                         content=GENTLEMAN_SYSTEM_PROMPT
@@ -131,8 +289,11 @@ class GentlemanBot:
                         role=MessagesRole.USER,
                         content=user_message
                     )
-                ],
-                temperature=0.7,
+                ]
+            
+            payload = Chat(
+                messages=messages,
+                temperature=1.0,
                 max_tokens=512,
             )
             
@@ -142,6 +303,13 @@ class GentlemanBot:
             if response and response.choices:
                 answer = response.choices[0].message.content
                 logger.info(f"📥 Ответ: {answer[:100]}")
+                
+                # Сохраняем в историю диалога если есть user_id
+                if user_id:
+                    user_id_str = str(user_id)
+                    self.add_to_dialog_history(user_id_str, "USER", user_message)
+                    self.add_to_dialog_history(user_id_str, "ASSISTANT", answer)
+                
                 return answer
             else:
                 logger.error(f"⚠️ Неожиданный формат ответа")
@@ -226,14 +394,45 @@ class GentlemanBot:
         
         logger.info(f"🎁 /compliment от {user_id}")
         
-        # Формируем подсказку для GigaChat
+        # Получаем контекст о предыдущих комплиментах
+        compliment_context = self.get_compliment_context(user_id_str)
+        
+        # Формируем подсказку для GigaChat с ОЧЕНЬ СТРОГИМИ инструкциями
         if user_id_str in self.user_names:
             name = self.user_names[user_id_str]
-            prompt = f"Придумай оригинальный, искренний и красивый комплимент для {name}. Один комплимент, без лишних объяснений. Используй её имя в комплименте."
+            prompt = f"""Ты — галантный джентльмен. Придумай НОВЫЙ комплимент для {name}.
+
+ТРЕБОВАНИЯ:
+1. Один комплимент, 1-2 предложения максимум
+2. Используй имя {name} в комплименте
+3. Должен быть ОРИГИНАЛЬНЫМ и УНИКАЛЬНЫМ - не повторять старые метафоры
+4. Фокусируйся на её ЛИЧНОСТИ, ХАРАКТЕРЕ, ВЛИЯНИИ, а не на внешности через природные образы
+
+{compliment_context}
+
+Комплимент:"""
         else:
-            prompt = "Придумай оригинальный, искренний и красивый комплимент для женщины. Один комплимент, без лишних объяснений."
+            prompt = f"""Ты — галантный джентльмен. Придумай НОВЫЙ комплимент для женщины.
+
+ТРЕБОВАНИЯ:
+1. Один комплимент, 1-2 предложения максимум
+2. ОРИГИНАЛЬНЫЙ и УНИКАЛЬНЫЙ - без старых метафор
+3. Про личность, характер, влияние на окружающих
+
+{compliment_context}
+
+Комплимент:"""
         
         response = self.get_response(prompt)
+        
+        # Очищаем ответ от лишнего
+        response = response.strip()
+        if response.startswith('"') and response.endswith('"'):
+            response = response[1:-1]
+        
+        # Сохраняем комплимент
+        self.add_compliment(user_id_str, response)
+        
         await update.message.reply_text(response)
     
     async def setname_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,7 +509,7 @@ class GentlemanBot:
         
         await update.message.chat.send_action("typing")
         
-        response = self.get_response(user_message)
+        response = self.get_response(user_message, user_id)
         logger.info(f"📬 Отправляю ответ {user_id}")
         await update.message.reply_text(response)
     
